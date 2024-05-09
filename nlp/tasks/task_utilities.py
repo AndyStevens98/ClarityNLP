@@ -14,7 +14,7 @@ from data_access import base_model
 from data_access import jobs
 from data_access import pipeline_config
 from data_access import pipeline_config as config
-from data_access import solr_data, filesystem_data, memory_data
+from data_access import solr_data
 from claritynlp_logging import log, ERROR, DEBUG
 from xml.sax import saxutils as su
 
@@ -31,13 +31,7 @@ segment = segmentation.Segmentation()
 @cached(document_cache)
 def _get_document_by_id(document_id):
     util.add_cache_compute_count()
-
-    if util.solr_url.startswith('http'):
-        return solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-    elif memory_data.IN_MEMORY_DATA == util.solr_url:
-        return memory_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-    else:
-        return filesystem_data.query_doc_by_id(document_id, solr_url=util.solr_url)
+    return solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
 
 
 def get_document_by_id(document_id):
@@ -48,13 +42,7 @@ def get_document_by_id(document_id):
         txt = util.get_from_redis_cache("doc:" + document_id)
         if not txt:
             util.add_cache_compute_count()
-
-            if util.solr_url.startswith('http'):
-                doc = solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-            elif memory_data.IN_MEMORY_DATA == util.solr_url:
-                doc = memory_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-            else:
-                doc = filesystem_data.query_doc_by_id(document_id, solr_url=util.solr_url)
+            doc = solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
             util.write_to_redis_cache("doc:" + document_id, json.dumps(doc))
         else:
             doc = json.loads(txt)
@@ -63,12 +51,7 @@ def get_document_by_id(document_id):
         doc = _get_document_by_id(document_id)
 
     if not doc:
-        if util.solr_url.startswith('http'):
-            return solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-        elif memory_data.IN_MEMORY_DATA == util.solr_url:
-            return memory_data.query_doc_by_id(document_id, solr_url=util.solr_url)
-        else:
-            return filesystem_data.query_doc_by_id(document_id, solr_url=util.solr_url)
+        return solr_data.query_doc_by_id(document_id, solr_url=util.solr_url)
     else:
         return doc
 
@@ -85,6 +68,22 @@ def document_sections(doc):
             log(e)
         names = [x.concept for x in section_headers]
         return names, section_texts
+
+
+def document_sections_ext(doc):
+    if util.use_precomputed_segmentation == "true" and section_names_key in doc and len(doc[section_names_key]) > 0:
+        return doc[section_names_key], doc[section_text_key]
+    else:
+        txt = document_text(doc)
+        section_headers, section_texts = [UNKNOWN], [txt]
+        try:
+            section_headers, section_texts = sec_tag_process(txt)
+        except Exception as e:
+            log(e)
+        # includes the section number from the concept hierarchy in brackets
+        # example: pulmonary_exam [6.40.139.195.128]
+        names_with_numbers = [x.to_output_string() for x in section_headers]
+        return names_with_numbers, section_texts
 
 
 def document_sentences(doc):
@@ -169,8 +168,8 @@ def pipeline_mongo_writer(client, pipeline_id, pipeline_type, job, batch, p_conf
     data_fields["phenotype_final"] = (phenotype_final or p_config.final)
     data_fields["display_name"] = p_config.display_name
 
-    if "_id" in data_fields:
-        del data_fields["_id"]
+    if '_id' in data_fields:
+        del data_fields['_id']
 
     if doc:
         data_fields["report_id"] = doc[util.solr_report_id_field]
@@ -271,8 +270,8 @@ class BaseCollector(base_model.BaseModel):
 class BaseTask(luigi.Task):
     # removing these parameters will require use of 'self.' throughout all tasks
     pipeline = luigi.IntParameter()
-    job =      luigi.IntParameter()
-    start =    luigi.IntParameter()
+    job = luigi.IntParameter()
+    start = luigi.IntParameter()
     solr_query = luigi.Parameter()
     batch = luigi.IntParameter()
     parallel_task = True
@@ -297,30 +296,20 @@ class BaseTask(luigi.Task):
                 self.pipeline_config = config.get_pipeline_config(self.pipeline, util.conn_string)
                 jobs.update_job_status(str(self.job), util.conn_string, jobs.IN_PROGRESS, "Running Solr query")
 
-                # the solr "url" determines where to find the documents
-                if util.solr_url.startswith('http'):
-                    data_store = solr_data
-                elif memory_data.IN_MEMORY_DATA == util.solr_url:
-                    if not self.pipeline_config.report_source and len(self.pipeline_config.report_source) == 0:
-                        self.pipeline_config.report_source = str(self.job)
-                    self.pipeline_config.sources = [self.pipeline_config.report_source]
-                    data_store = memory_data
-                else:
-                    data_store = filesystem_data
-
-                self.docs = data_store.query(self.solr_query,
-                                                rows=util.row_count,
-                                                start=self.start,
-                                                solr_url=util.solr_url,
-                                                tags=self.pipeline_config.report_tags,
-                                                mapper_inst=util.report_mapper_inst,
-                                                mapper_url=util.report_mapper_url,
-                                                mapper_key=util.report_mapper_key,
-                                                types=self.pipeline_config.report_types,
-                                                sources=self.pipeline_config.sources,
-                                                filter_query=self.pipeline_config.filter_query,
-                                                cohort_ids=self.pipeline_config.cohort,
-                                                job_results_filters=self.pipeline_config.job_results)
+                # get docs from Solr
+                self.docs = solr_data.query(self.solr_query,
+                                            rows=util.row_count,
+                                            start=self.start,
+                                            solr_url=util.solr_url,
+                                            tags=self.pipeline_config.report_tags,
+                                            mapper_inst=util.report_mapper_inst,
+                                            mapper_url=util.report_mapper_url,
+                                            mapper_key=util.report_mapper_key,
+                                            types=self.pipeline_config.report_types,
+                                            sources=self.pipeline_config.sources,
+                                            filter_query=self.pipeline_config.filter_query,
+                                            cohort_ids=self.pipeline_config.cohort,
+                                            job_results_filters=self.pipeline_config.job_results)
 
                 #log('BaseTask::run: found {0} docs with query "{1}"'.format(len(self.docs), self.solr_query))
                 #log('BaseTask::run: start = {0}'.format(self.start))
@@ -402,3 +391,7 @@ class BaseTask(luigi.Task):
     def get_document_sections(self, doc):
         names, section_texts = document_sections(doc)
         return names, section_texts
+
+    def get_document_sections_ext(self, doc):
+        section_headers, section_texts = document_sections_ext(doc)
+        return section_headers, section_texts
