@@ -21,8 +21,6 @@ RUN mamba create --name claritynlp python=3.10
 RUN echo "conda activate claritynlp" >> ~/.bashrc
 SHELL ["/bin/bash", "--login", "-c"]
 
-RUN mamba config --env --add channels conda-forge
-RUN mamba config --env --set channel_priority strict
 RUN mamba install --file conda_requirements.txt
 RUN pip install -r conda_pip_requirements.txt
 RUN python3 -m spacy download en_core_web_sm
